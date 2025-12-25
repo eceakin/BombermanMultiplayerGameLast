@@ -376,9 +376,9 @@ namespace BombermanGame.src.Core
 		{
 			await ConnectToServerAsync();
 		}
-
 		private void BrowseRooms(User user)
 		{
+			// Bağlantı kontrolü
 			if (_signalRClient == null || !_signalRClient.IsConnected)
 			{
 				ConsoleUI.ShowError("Not connected to server!");
@@ -388,44 +388,78 @@ namespace BombermanGame.src.Core
 
 			_lobbyDisplay.ShowLoadingAnimation("Loading rooms", 1000);
 
+			// Veriyi çekme
 			var roomListTask = _signalRClient.GetRoomListAsync();
 			roomListTask.Wait();
-
 			var roomListResponse = roomListTask.Result;
 
 			if (roomListResponse == null)
 			{
-				ConsoleUI.ShowError("Failed to get room list");
+				ConsoleUI.ShowError("Failed to get room list (Null response)");
 				Thread.Sleep(2000);
 				return;
 			}
 
+			// JSON Dönüşümü
 			var jsonElement = (System.Text.Json.JsonElement)roomListResponse;
-			var roomsArray = jsonElement.GetProperty("Rooms");
+			System.Text.Json.JsonElement roomsArray;
+
+			// --- KRİTİK DÜZELTME: Hem 'rooms' hem 'Rooms' kontrolü ---
+			if (jsonElement.TryGetProperty("rooms", out roomsArray))
+			{
+				// Küçük harf bulundu, sorun yok
+			}
+			else if (jsonElement.TryGetProperty("Rooms", out roomsArray))
+			{
+				// Büyük harf bulundu, sorun yok
+			}
+			else
+			{
+				// İkisi de yoksa hatayı ekrana bas ama çökme
+				ConsoleUI.ShowError("List not found in JSON response!");
+				Console.WriteLine($"\n[DEBUG] Server sent keys: {jsonElement.ToString()}"); // Hata ayıklama için
+				Thread.Sleep(5000);
+				return;
+			}
+			// -----------------------------------------------------------
 
 			var rooms = new System.Collections.Generic.List<RoomInfo>();
 
-			foreach (var roomElement in roomsArray.EnumerateArray())
+			try
 			{
-				var room = new RoomInfo
+				foreach (var roomElement in roomsArray.EnumerateArray())
 				{
-					Id = roomElement.GetProperty("Id").GetString() ?? "",
-					Name = roomElement.GetProperty("Name").GetString() ?? "",
-					Theme = roomElement.GetProperty("Theme").GetString() ?? "Desert",
-					State = roomElement.GetProperty("State").GetString() ?? "Waiting",
-					CurrentPlayers = roomElement.GetProperty("CurrentPlayers").GetInt32(),
-					MaxPlayers = roomElement.GetProperty("MaxPlayers").GetInt32()
-				};
+					// Güvenli okuma yardımcı metotları (Aşağıdaki helper'ları da eklemeyi unutma!)
+					var room = new RoomInfo
+					{
+						Id = GetSafeString(roomElement, "id", "Id"),
+						Name = GetSafeString(roomElement, "name", "Name"),
+						Theme = GetSafeString(roomElement, "theme", "Theme", "Desert"),
+						State = GetSafeString(roomElement, "state", "State", "Waiting"),
+						CurrentPlayers = GetSafeInt(roomElement, "currentPlayers", "CurrentPlayers"),
+						MaxPlayers = GetSafeInt(roomElement, "maxPlayers", "MaxPlayers")
+					};
 
-				var playerNamesArray = roomElement.GetProperty("PlayerNames");
-				foreach (var playerName in playerNamesArray.EnumerateArray())
-				{
-					room.PlayerNames.Add(playerName.GetString() ?? "");
+					// Oyuncu isimleri listesini okuma
+					if (TryGetPropertyCaseInsensitive(roomElement, "playerNames", out var playerNamesElement)
+						&& playerNamesElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+					{
+						foreach (var playerName in playerNamesElement.EnumerateArray())
+						{
+							room.PlayerNames.Add(playerName.GetString() ?? "");
+						}
+					}
+					rooms.Add(room);
 				}
-
-				rooms.Add(room);
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine($"\n[JSON ERROR] {ex.Message}");
+				Thread.Sleep(3000);
+				return;
 			}
 
+			// Listeyi göster
 			int selectedIndex = _lobbyDisplay.NavigateRoomList(rooms);
 
 			if (selectedIndex >= 0 && selectedIndex < rooms.Count)
@@ -438,6 +472,29 @@ namespace BombermanGame.src.Core
 			}
 		}
 
+		// --- BU YARDIMCI METOTLARI EN ALTA EKLEMEYİ UNUTMA ---
+		private string GetSafeString(System.Text.Json.JsonElement element, string key1, string key2, string def = "")
+		{
+			if (element.TryGetProperty(key1, out var val)) return val.GetString() ?? def;
+			if (element.TryGetProperty(key2, out var val2)) return val2.GetString() ?? def;
+			return def;
+		}
+
+		private int GetSafeInt(System.Text.Json.JsonElement element, string key1, string key2, int def = 0)
+		{
+			if (element.TryGetProperty(key1, out var val) && val.TryGetInt32(out int res)) return res;
+			if (element.TryGetProperty(key2, out var val2) && val2.TryGetInt32(out int res2)) return res2;
+			return def;
+		}
+
+		private bool TryGetPropertyCaseInsensitive(System.Text.Json.JsonElement elm, string key, out System.Text.Json.JsonElement val)
+		{
+			if (elm.TryGetProperty(key, out val)) return true; // tam eşleşme
+			if (elm.TryGetProperty(char.ToUpper(key[0]) + key.Substring(1), out val)) return true; // PascalCase
+			if (elm.TryGetProperty(key.ToLower(), out val)) return true; // lowerCase
+			val = default;
+			return false;
+		}
 		private void CreateRoom(User user)
 		{
 			if (_signalRClient == null || !_signalRClient.IsConnected) return;
